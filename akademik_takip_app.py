@@ -1,27 +1,24 @@
 import re
 import uuid
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ModuleNotFoundError:
-    st_autorefresh = None
-
 
 # ============================================================
-# AKADEMİK İŞ TAKİP VE KANIT DOSYASI SİSTEMİ - WEB SÜRÜMÜ
+# AKADEMİK İŞ TAKİP VE KANIT DOSYASI SİSTEMİ - SADE WEB SÜRÜMÜ
 # ============================================================
-# Bu sürüm:
-# - SQLite kullanmaz.
-# - Yerel kanit_dosyalari klasörü kullanmaz.
-# - Verileri Supabase veritabanında saklar.
-# - Kanıt dosyalarını Supabase Storage içinde saklar.
-# - Streamlit Cloud üzerinden web sayfası gibi çalışır.
+# Bu sürümde:
+# - Otomatik yenileme yoktur.
+# - Renkli tablo yoktur.
+# - Pandas Styler yoktur.
+# - st.rerun() yoktur.
+# - Genel Durum Tablosundan Kanıtları Görüntüle bölümü yoktur.
+# - Kanıt dosyaları sayfa açılırken indirilmez.
+# - Dosya açma için Supabase signed URL kullanılır.
 # ============================================================
 
 
@@ -69,10 +66,6 @@ supabase = get_supabase_client()
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def today_text():
-    return str(date.today())
 
 
 def clean_filename(filename):
@@ -418,31 +411,46 @@ def get_evidence_files(task_id):
     return pd.DataFrame(data)
 
 
-def get_evidence_count(task_id):
-    evidence_df = get_evidence_files(task_id)
-    return len(evidence_df)
+def get_all_evidence_for_project(project_id):
+    tasks_df = get_tasks(project_id)
 
+    if tasks_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "task_id",
+                "original_filename",
+                "storage_path",
+                "evidence_note",
+                "uploaded_at",
+            ]
+        )
 
-def get_evidence_names(task_id):
-    evidence_df = get_evidence_files(task_id)
+    task_ids = tasks_df["id"].astype(int).tolist()
 
-    if evidence_df.empty:
-        return ""
-
-    names = evidence_df["original_filename"].tolist()
-
-    return " | ".join(names)
-
-
-def download_evidence_file(storage_path):
-    result = (
+    response = (
         supabase
-        .storage
-        .from_(BUCKET_NAME)
-        .download(storage_path)
+        .table("evidence_files")
+        .select("*")
+        .in_("task_id", task_ids)
+        .execute()
     )
 
-    return result
+    data = run_query(response)
+
+    if not data:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "task_id",
+                "original_filename",
+                "storage_path",
+                "evidence_note",
+                "uploaded_at",
+            ]
+        )
+
+    return pd.DataFrame(data)
 
 
 def delete_evidence_file(evidence_id, storage_path):
@@ -465,6 +473,32 @@ def delete_evidence_file(evidence_id, storage_path):
     )
 
 
+def create_signed_file_url(storage_path):
+    """
+    Dosya sayfa açılırken indirilmez.
+    Kullanıcı butona tıkladığında Supabase geçici bağlantısı üzerinden açılır.
+    """
+
+    result = (
+        supabase
+        .storage
+        .from_(BUCKET_NAME)
+        .create_signed_url(
+            path=storage_path,
+            expires_in=3600,
+        )
+    )
+
+    if isinstance(result, dict):
+        return (
+            result.get("signedURL")
+            or result.get("signedUrl")
+            or result.get("signed_url")
+        )
+
+    return None
+
+
 # ============================================================
 # GENEL TABLO VE İSTATİSTİKLER
 # ============================================================
@@ -475,22 +509,51 @@ def get_summary_table(project_id):
     if tasks_df.empty:
         return tasks_df
 
-    evidence_counts = []
-    evidence_names = []
+    evidence_df = get_all_evidence_for_project(project_id)
 
-    for _, row in tasks_df.iterrows():
-        task_id = int(row["id"])
+    if evidence_df.empty:
+        tasks_df["Kanıt Sayısı"] = 0
+        tasks_df["Kanıt Dosyaları"] = ""
+        return tasks_df
 
-        evidence_counts.append(
-            get_evidence_count(task_id)
-        )
+    evidence_count_df = (
+        evidence_df
+        .groupby("task_id")
+        .size()
+        .reset_index(name="Kanıt Sayısı")
+    )
 
-        evidence_names.append(
-            get_evidence_names(task_id)
-        )
+    evidence_names_df = (
+        evidence_df
+        .groupby("task_id")["original_filename"]
+        .apply(lambda names: " | ".join(names))
+        .reset_index(name="Kanıt Dosyaları")
+    )
 
-    tasks_df["Kanıt Sayısı"] = evidence_counts
-    tasks_df["Kanıt Dosyaları"] = evidence_names
+    tasks_df = tasks_df.merge(
+        evidence_count_df,
+        how="left",
+        left_on="id",
+        right_on="task_id",
+    )
+
+    tasks_df = tasks_df.merge(
+        evidence_names_df,
+        how="left",
+        left_on="id",
+        right_on="task_id",
+    )
+
+    tasks_df["Kanıt Sayısı"] = tasks_df["Kanıt Sayısı"].fillna(0).astype(int)
+    tasks_df["Kanıt Dosyaları"] = tasks_df["Kanıt Dosyaları"].fillna("")
+
+    tasks_df = tasks_df.drop(
+        columns=[
+            "task_id_x",
+            "task_id_y",
+        ],
+        errors="ignore",
+    )
 
     return tasks_df
 
@@ -557,31 +620,30 @@ def show_evidence_files(task_id, key_prefix):
                 st.write(f"**Kanıt notu:** {evidence_note}")
 
             try:
-                file_bytes = download_evidence_file(storage_path)
+                signed_url = create_signed_file_url(storage_path)
 
-                st.download_button(
-                    label="Dosyayı indir / aç",
-                    data=file_bytes,
-                    file_name=original_filename,
-                    key=f"download_{unique_key}",
-                )
+                if signed_url:
+                    st.link_button(
+                        label="Dosyayı aç / indir",
+                        url=signed_url,
+                    )
+                else:
+                    st.error("Dosya bağlantısı oluşturulamadı.")
 
-            except Exception:
-                st.error(
-                    "Dosya kaydı var; ancak depolama alanından indirilemedi."
-                )
+            except Exception as error:
+                st.error("Dosya bağlantısı oluşturulamadı.")
+                st.caption(str(error))
 
             if st.button(
                 "Bu kanıt dosyasını sil",
-                key=f"delete_{unique_key}",
+                key=f"delete_evidence_{unique_key}",
             ):
                 delete_evidence_file(
                     evidence_id=evidence_id,
                     storage_path=storage_path,
                 )
 
-                st.warning("Kanıt dosyası silindi.")
-                st.rerun()
+                st.success("Kanıt dosyası silindi. Güncel durumu görmek için sayfayı tarayıcıdan yenileyebilirsiniz.")
 
 
 # ============================================================
@@ -595,13 +657,8 @@ def app():
         layout="wide",
     )
 
-    if st_autorefresh is not None:
-        st_autorefresh(
-            interval=5000,
-            key="academic_tracker_autorefresh",
-        )
-
     st.title("📚 Akademik İş Takip ve Kanıt Dosyası Sistemi")
+    st.caption("Sade sürüm: otomatik yenileme, renklendirme ve st.rerun yoktur.")
 
     st.write(
         "Bu sistem; akademik çalışmaların literatür, veri toplama, "
@@ -609,12 +666,6 @@ def app():
         "izlemek ve her aşamaya ilişkin kanıt dosyalarını saklamak için "
         "hazırlanmıştır."
     )
-
-    if st_autorefresh is None:
-        st.warning(
-            "Otomatik yenileme paketi kurulu değil. "
-            "requirements.txt dosyasına streamlit-autorefresh eklenmelidir."
-        )
 
     with st.sidebar:
         st.title("İşlemler")
@@ -641,8 +692,10 @@ def app():
                         description=new_description.strip(),
                     )
 
-                    st.success("Yeni akademik çalışma oluşturuldu.")
-                    st.rerun()
+                    st.success(
+                        "Yeni akademik çalışma oluşturuldu. "
+                        "Güncel listeyi görmek için sayfayı tarayıcıdan yenileyebilirsiniz."
+                    )
 
                 except Exception as error:
                     st.error(
@@ -744,35 +797,6 @@ def app():
             key=f"summary_csv_{selected_project_id}",
         )
 
-    st.markdown("### Genel Durum Tablosundan Kanıtları Görüntüle")
-
-    if summary_df.empty:
-        st.info("Kanıt görüntülemek için önce iş kalemi eklenmelidir.")
-    else:
-        task_options = {}
-
-        for _, row in summary_df.iterrows():
-            label = (
-                f"{row['İş Kalemi']} "
-                f"— Durum: {row['Durum']} "
-                f"— Kanıt: {row['Kanıt Sayısı']}"
-            )
-
-            task_options[label] = int(row["id"])
-
-        selected_task_label = st.selectbox(
-            "Kanıtlarını görmek istediğiniz iş kalemini seçiniz",
-            list(task_options.keys()),
-            key=f"summary_evidence_selector_{selected_project_id}",
-        )
-
-        selected_task_id = task_options[selected_task_label]
-
-        show_evidence_files(
-            task_id=selected_task_id,
-            key_prefix="summary_area",
-        )
-
     st.markdown("---")
 
     st.markdown("### İş Kalemlerini Güncelle ve Kanıt Dosyası Yükle")
@@ -780,9 +804,21 @@ def app():
     if raw_tasks_df.empty:
         st.info("Bu çalışmada henüz iş kalemi bulunmamaktadır.")
     else:
+        evidence_summary_df = get_all_evidence_for_project(selected_project_id)
+
+        if evidence_summary_df.empty:
+            evidence_count_map = {}
+        else:
+            evidence_count_map = (
+                evidence_summary_df
+                .groupby("task_id")
+                .size()
+                .to_dict()
+            )
+
         for _, raw_row in raw_tasks_df.iterrows():
             task_id = int(raw_row["id"])
-            evidence_count = get_evidence_count(task_id)
+            evidence_count = int(evidence_count_map.get(task_id, 0))
 
             expander_title = (
                 f"{raw_row['task_name']} | "
@@ -844,8 +880,10 @@ def app():
                             notes=notes,
                         )
 
-                        st.success("İş kalemi güncellendi.")
-                        st.rerun()
+                        st.success(
+                            "İş kalemi güncellendi. "
+                            "Güncel tabloyu görmek için sayfayı tarayıcıdan yenileyebilirsiniz."
+                        )
 
                 with col_delete:
                     if st.button(
@@ -855,9 +893,9 @@ def app():
                         delete_task(task_id)
 
                         st.warning(
-                            "İş kalemi ve ona bağlı kanıt dosyaları silindi."
+                            "İş kalemi ve ona bağlı kanıt dosyaları silindi. "
+                            "Güncel listeyi görmek için sayfayı tarayıcıdan yenileyebilirsiniz."
                         )
-                        st.rerun()
 
                 st.markdown("---")
                 st.markdown("#### Kanıt Dosyası Yükle")
@@ -897,8 +935,10 @@ def app():
                                     evidence_note=evidence_note.strip(),
                                 )
 
-                            st.success("Kanıt dosyaları kaydedildi.")
-                            st.rerun()
+                            st.success(
+                                "Kanıt dosyaları kaydedildi. "
+                                "Güncel listeyi görmek için sayfayı tarayıcıdan yenileyebilirsiniz."
+                            )
 
                         except Exception as error:
                             st.error("Kanıt dosyası yüklenemedi.")
@@ -937,8 +977,10 @@ def app():
                 task_name=custom_task_name.strip(),
             )
 
-            st.success("Yeni iş kalemi eklendi.")
-            st.rerun()
+            st.success(
+                "Yeni iş kalemi eklendi. "
+                "Güncel listeyi görmek için sayfayı tarayıcıdan yenileyebilirsiniz."
+            )
 
     st.markdown("---")
 
@@ -961,8 +1003,10 @@ def app():
         if confirm_delete:
             delete_project(selected_project_id)
 
-            st.warning("Akademik çalışma ve bağlı kanıt dosyaları silindi.")
-            st.rerun()
+            st.warning(
+                "Akademik çalışma ve bağlı kanıt dosyaları silindi. "
+                "Güncel listeyi görmek için sayfayı tarayıcıdan yenileyebilirsiniz."
+            )
         else:
             st.error("Silme işlemi için önce onay kutusunu işaretleyiniz.")
 
