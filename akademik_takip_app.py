@@ -7,21 +7,15 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ModuleNotFoundError:
-    st_autorefresh = None
-
 
 # ============================================================
 # AKADEMİK İŞ TAKİP VE KANIT DOSYASI SİSTEMİ - WEB SÜRÜMÜ
 # ============================================================
 # Bu sürüm:
-# - SQLite kullanmaz.
-# - Yerel kanit_dosyalari klasörü kullanmaz.
 # - Verileri Supabase veritabanında saklar.
 # - Kanıt dosyalarını Supabase Storage içinde saklar.
 # - Streamlit Cloud üzerinden web sayfası gibi çalışır.
+# - Durumları renkli etiketlerle gösterir.
 # ============================================================
 
 
@@ -108,6 +102,40 @@ def safe_text(value):
         return ""
 
     return str(value)
+
+
+def status_badge(status):
+    """
+    İş durumunu renkli ve okunabilir etiket olarak döndürür.
+    """
+
+    if status == "Tamamlandı":
+        return "🟢 Tamamlandı"
+
+    if status == "Devam ediyor":
+        return "🟡 Devam ediyor"
+
+    if status == "Yapılmadı":
+        return "🔴 Yapılmadı"
+
+    return safe_text(status)
+
+
+def status_color_for_dataframe(value):
+    """
+    Pandas Styler için durum hücrelerini renklendirir.
+    """
+
+    if value == "🟢 Tamamlandı":
+        return "background-color: #d4edda; color: #155724; font-weight: bold;"
+
+    if value == "🟡 Devam ediyor":
+        return "background-color: #fff3cd; color: #856404; font-weight: bold;"
+
+    if value == "🔴 Yapılmadı":
+        return "background-color: #f8d7da; color: #721c24; font-weight: bold;"
+
+    return ""
 
 
 # ============================================================
@@ -595,12 +623,6 @@ def app():
         layout="wide",
     )
 
-    if st_autorefresh is not None:
-        st_autorefresh(
-            interval=5000,
-            key="academic_tracker_autorefresh",
-        )
-
     st.title("📚 Akademik İş Takip ve Kanıt Dosyası Sistemi")
 
     st.write(
@@ -610,11 +632,12 @@ def app():
         "hazırlanmıştır."
     )
 
-    if st_autorefresh is None:
-        st.warning(
-            "Otomatik yenileme paketi kurulu değil. "
-            "requirements.txt dosyasına streamlit-autorefresh eklenmelidir."
-        )
+    st.markdown(
+        """
+        **Durum göstergeleri:**  
+        🔴 Yapılmadı &nbsp;&nbsp; 🟡 Devam ediyor &nbsp;&nbsp; 🟢 Tamamlandı
+        """
+    )
 
     with st.sidebar:
         st.title("İşlemler")
@@ -724,14 +747,29 @@ def app():
             errors="ignore",
         )
 
+        if "Durum" in display_summary_df.columns:
+            display_summary_df["Durum"] = display_summary_df["Durum"].apply(
+                status_badge
+            )
+
+        styled_summary_df = display_summary_df.style.applymap(
+            status_color_for_dataframe,
+            subset=["Durum"],
+        )
+
         st.dataframe(
-            display_summary_df,
+            styled_summary_df,
             use_container_width=True,
             hide_index=True,
         )
 
+        csv_export_df = summary_df.drop(
+            columns=["id"],
+            errors="ignore",
+        )
+
         csv_data = (
-            display_summary_df
+            csv_export_df
             .to_csv(index=False)
             .encode("utf-8-sig")
         )
@@ -754,7 +792,7 @@ def app():
         for _, row in summary_df.iterrows():
             label = (
                 f"{row['İş Kalemi']} "
-                f"— Durum: {row['Durum']} "
+                f"— Durum: {status_badge(row['Durum'])} "
                 f"— Kanıt: {row['Kanıt Sayısı']}"
             )
 
@@ -786,7 +824,7 @@ def app():
 
             expander_title = (
                 f"{raw_row['task_name']} | "
-                f"Durum: {raw_row['status']} | "
+                f"Durum: {status_badge(raw_row['status'])} | "
                 f"Kanıt dosyası: {evidence_count}"
             )
 
