@@ -769,7 +769,7 @@ def app():
                 status_badge
             )
 
-        styled_summary_df = display_summary_df.style.applymap(
+        styled_summary_df = display_summary_df.style.map(
             status_color_for_dataframe,
             subset=["Durum"],
         )
