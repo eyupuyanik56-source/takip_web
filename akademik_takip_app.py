@@ -7,10 +7,6 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ModuleNotFoundError:
-    st_autorefresh = None
 
 
 # ============================================================
@@ -628,12 +624,6 @@ def app():
         layout="wide",
     )
 
-    if st_autorefresh is not None:
-        st_autorefresh(
-            interval=5000,
-            key="academic_tracker_autorefresh",
-        )
-
     st.title("📚 Akademik İş Takip ve Kanıt Dosyası Sistemi")
 
     st.write(
@@ -649,12 +639,6 @@ def app():
         🔴 Yapılmadı &nbsp;&nbsp; 🟡 Devam ediyor &nbsp;&nbsp; 🟢 Tamamlandı
         """
     )
-
-    if st_autorefresh is None:
-        st.warning(
-            "Otomatik yenileme paketi kurulu değil. "
-            "requirements.txt dosyasına streamlit-autorefresh eklenmelidir."
-        )
 
     with st.sidebar:
         st.title("İşlemler")
